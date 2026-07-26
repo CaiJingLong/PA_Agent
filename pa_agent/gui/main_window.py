@@ -564,6 +564,13 @@ class MainWindow(QMainWindow):
         self._submit_btn.setMinimumWidth(100)
         self._submit_btn.clicked.connect(self._on_submit_analysis)
         ctrl_layout.addWidget(self._submit_btn)
+        # Agent execution-status indicator — prominent feedback right next to
+        # the submit button so the user sees what the agent is doing.
+        from pa_agent.gui.widgets.agent_status_indicator import AgentStatusIndicator
+
+        self._agent_status = AgentStatusIndicator()
+        self._agent_status.set_state("idle")
+        ctrl_layout.addWidget(self._agent_status)
 
         # Incremental button is kept for programmatic use but hidden from the
         # toolbar — the submit button's label changes to "增量分析" automatically
@@ -895,6 +902,8 @@ class MainWindow(QMainWindow):
             self._cancel_token.set()
         worker = self._worker
         self._worker = None
+        if worker is not None:
+            self._set_agent_status("cancelled")
         if worker is None:
             return
         # Disconnect before join so stale slots cannot touch the UI mid-switch.
@@ -1537,6 +1546,12 @@ class MainWindow(QMainWindow):
             return 100
         return int(getattr(settings.general, "analysis_bar_count", 100))
 
+    def _set_agent_status(self, state: str) -> None:
+        """Update the agent execution-status indicator next to the submit button."""
+        indicator = getattr(self, "_agent_status", None)
+        if indicator is not None and _qobject_alive(indicator):
+            indicator.set_state(state)
+
     def _on_status_update(self, text: str) -> None:
         """Update the status bar with subscription / analysis / data-delay text."""
         if not self._ui_is_alive():
@@ -1558,7 +1573,22 @@ class MainWindow(QMainWindow):
                     panel.mark_retry("stage2")
                 else:
                     panel.on_analysis_progress(text)
-        # ── Drive FlowBar step indicators ────────────────────────────────────
+        # ── Drive agent-status indicator + FlowBar step indicators ─────────
+        _STATUS_TO_AGENT = {
+            "阶段一分析中…": "stage1",
+            "阶段一重试": "stage1_retry",
+            "阶段一完成": "stage1",
+            "阶段一失败": "error",
+            "阶段二分析中…": "stage2",
+            "阶段二重试": "stage2_retry",
+            "阶段二完成": "stage2",
+            "阶段二失败": "error",
+            "记录已保存": "done",
+            "已取消": "cancelled",
+        }
+        agent_state = _STATUS_TO_AGENT.get(text)
+        if agent_state is not None:
+            self._set_agent_status(agent_state)
         flow = getattr(self, "_flow_bar", None)
         if flow is not None:
             # Steps: 0=数据 1=快照 2=诊断(Stage1) 3=决策(Stage2) 4=追问
@@ -2990,6 +3020,7 @@ class MainWindow(QMainWindow):
         from pa_agent.gui.snapshot_worker import SnapshotFetchWorker
 
         self._status_bar.showMessage("正在后台获取K线…")
+        self._set_agent_status("fetching")
         from pa_agent.data.snapshot import INDICATOR_WARMUP_BARS
 
         worker = SnapshotFetchWorker(
@@ -3009,6 +3040,7 @@ class MainWindow(QMainWindow):
             self._snapshot_fetch_worker = None
             if not self._bars_sufficient_for_analysis(bars, bar_count):
                 self._status_bar.showMessage("数据不足，请等待图表刷新后再提交")
+                self._set_agent_status("idle")
                 return
             self._last_frame_ready_bars = list(bars)
             self._start_analysis_with_bars(
@@ -3026,6 +3058,7 @@ class MainWindow(QMainWindow):
                 return
             self._snapshot_fetch_worker = None
             self._status_bar.showMessage(msg or "获取K线失败")
+            self._set_agent_status("error")
 
         worker.bars_ready.connect(_on_bars)
         worker.failed.connect(_on_fail)
@@ -3053,6 +3086,7 @@ class MainWindow(QMainWindow):
         self._update_submit_button_state()
         self._status_bar.showMessage("准备分析…（构建快照）")
         self._decision_badge.setText("准备中…")
+        self._set_agent_status("preparing")
 
         from pa_agent.gui.analysis_prep_worker import AnalysisPrepWorker
 
@@ -3096,6 +3130,7 @@ class MainWindow(QMainWindow):
             self._update_submit_button_state()
             self._status_bar.showMessage(msg or "准备分析失败")
             self._decision_badge.setText("")
+            self._set_agent_status("error")
 
         prep.ready.connect(_on_ready)
         prep.failed.connect(_on_failed)
@@ -3117,6 +3152,7 @@ class MainWindow(QMainWindow):
             self._analysis_in_progress = False
             self._update_submit_button_state()
             self._status_bar.showMessage("数据不足，请等待图表刷新后再提交")
+            self._set_agent_status("idle")
             return
 
         self._last_analysis_frame = frame
@@ -3128,16 +3164,16 @@ class MainWindow(QMainWindow):
         if force_incremental and previous_record is None:
             reason = self._incremental_unavailable_reason(frame, symbol, timeframe)
             self._analysis_in_progress = False
-            self._update_submit_button_state()
             self._status_bar.showMessage(reason)
+            self._set_agent_status("idle")
             QMessageBox.warning(self, "无法增量分析", reason)
             return
 
         orchestrator = self._build_orchestrator()
         if orchestrator is None:
             self._analysis_in_progress = False
-            self._update_submit_button_state()
             self._status_bar.showMessage("编排器未就绪，请检查设置")
+            self._set_agent_status("error")
             return
 
         try:
@@ -3250,6 +3286,7 @@ class MainWindow(QMainWindow):
                 f"分析中…（倾向:{stance_label}，图表已冻结，K1=最新已收盘K线）"
             )
         self._decision_badge.setText("分析中…")
+        self._set_agent_status("stage1")
         self._ai_sidebar.focus_stream()
 
         panel = getattr(self, "_stream_panel", None)
@@ -3678,6 +3715,7 @@ class MainWindow(QMainWindow):
         if not self._ui_is_alive():
             return
         self._last_analysis_had_error = True
+        self._set_agent_status("error")
         debug = getattr(self, "_debug_widget", None)
         if debug is not None:
             debug.add_turn({
@@ -4154,6 +4192,11 @@ class MainWindow(QMainWindow):
             self._auto_incremental_pending = False
             self._worker = None
             self._update_submit_button_state()
+            # Agent status: green if completed, red if the run errored.
+            if not getattr(self, "_last_analysis_had_error", False):
+                self._set_agent_status("done")
+            else:
+                self._set_agent_status("error")
 
             # Reap any zombie workers / refresh loops that finished while busy
             self._reap_zombie_workers()
