@@ -1549,6 +1549,7 @@ class MainWindow(QMainWindow):
     def _set_agent_status(self, state: str) -> None:
         """Update the agent execution-status indicator next to the submit button."""
         indicator = getattr(self, "_agent_status", None)
+        logger.info("[AgentStatus] state=%s indicator=%s", state, bool(indicator))
         if indicator is not None and _qobject_alive(indicator):
             indicator.set_state(state)
 
