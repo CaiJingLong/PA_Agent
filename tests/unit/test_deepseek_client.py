@@ -415,3 +415,72 @@ def test_mimo_chat_patches_tool_call_messages_before_send() -> None:
 
     sent_messages = mock_openai.return_value.chat.completions.create.call_args.kwargs["messages"]
     assert sent_messages[1]["reasoning_content"] == ""
+
+
+def test_gpt5_uses_max_completion_tokens_not_max_tokens():
+    """GPT-5/o-series must use max_completion_tokens (max_tokens is deprecated)."""
+    settings = _make_settings()
+    settings.base_url = "https://ai.codeapx.com/v1"
+    settings.model = "gpt-5.6-sol"
+    settings.thinking = True
+    settings.reasoning_effort = "high"
+    client = DeepSeekClient(settings)
+
+    mock_resp = _make_mock_response()
+    mock_openai = MagicMock()
+    mock_openai.return_value.chat.completions.create.return_value = mock_resp
+
+    with patch("pa_agent.ai.deepseek_client._OpenAI", mock_openai):
+        client.chat([{"role": "user", "content": "hi"}])
+
+    kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
+    assert "max_completion_tokens" in kwargs
+    assert "max_tokens" not in kwargs
+    assert kwargs["max_completion_tokens"] == 128_000
+    assert kwargs["reasoning_effort"] == "high"
+
+
+def test_gpt5_stream_uses_max_completion_tokens():
+    """GPT-5 streaming must also use max_completion_tokens."""
+    settings = _make_settings()
+    settings.base_url = "https://ai.codeapx.com/v1"
+    settings.model = "gpt-5.6-sol"
+    settings.thinking = True
+    settings.reasoning_effort = "high"
+    client = DeepSeekClient(settings)
+
+    mock_chunk = MagicMock()
+    mock_chunk.choices = []
+    mock_chunk.usage = None
+    mock_stream = iter([mock_chunk])
+    mock_openai = MagicMock()
+    mock_openai.return_value.chat.completions.create.return_value = mock_stream
+
+    with patch("pa_agent.ai.deepseek_client._OpenAI", mock_openai):
+        client.stream_chat([{"role": "user", "content": "hi"}])
+
+    kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
+    assert "max_completion_tokens" in kwargs
+    assert "max_tokens" not in kwargs
+    assert kwargs["max_completion_tokens"] == 128_000
+
+
+def test_non_gpt5_still_uses_max_tokens():
+    """Non-GPT-5 models should still use max_tokens (backward compat)."""
+    settings = _make_settings()
+    settings.base_url = "https://api.deepseek.com"
+    settings.model = "deepseek-v4-pro"
+    settings.thinking = True
+    settings.reasoning_effort = "medium"
+    client = DeepSeekClient(settings)
+
+    mock_resp = _make_mock_response()
+    mock_openai = MagicMock()
+    mock_openai.return_value.chat.completions.create.return_value = mock_resp
+
+    with patch("pa_agent.ai.deepseek_client._OpenAI", mock_openai):
+        client.chat([{"role": "user", "content": "hi"}])
+
+    kwargs = mock_openai.return_value.chat.completions.create.call_args.kwargs
+    assert "max_tokens" in kwargs
+    assert "max_completion_tokens" not in kwargs

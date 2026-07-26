@@ -238,6 +238,45 @@ class _AnalysisWorker(QThread):
         self.finished.emit(decision)
 
 
+# ── Symbol Name Worker ────────────────────────────────────────────────────────
+
+class _SymbolNameWorker(QThread):
+    """Resolves a symbol code to a Chinese name via Sina's suggest API.
+
+    Emits ``name_ready(str, str)`` with ``(symbol_key, name)`` on success and
+    ``failed(str)`` on error.  Single-shot; cheap to spawn.
+    """
+
+    name_ready = pyqtSignal(str, str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, keyword: str, match_field: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._keyword = keyword
+        self._match_field = match_field  # "fullcode" | "code"
+
+    def run(self) -> None:
+        from pa_agent.data.symbol_search import SymbolSearchError, search_symbols
+
+        try:
+            rows = search_symbols(self._keyword, count=20, timeout=4.0)
+        except SymbolSearchError as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"名称查询出错: {exc}")
+            return
+        target = self._keyword.strip().lower()
+        for row in rows:
+            field_val = str(row.get(self._match_field, "")).strip().lower()
+            if field_val == target:
+                name = str(row.get("name", "")).strip()
+                if name:
+                    self.name_ready.emit(self._keyword.strip(), name)
+                    return
+        self.failed.emit("no match")
+
+
 # ── MainWindow ────────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
@@ -255,6 +294,9 @@ class MainWindow(QMainWindow):
         self._prep_worker: Any = None
         self._prep_worker_id: object | None = None
         self._cancel_token: Any = None
+        self._symbol_name_cache: dict[str, str] = {}  # combo-text -> Chinese name
+        self._symbol_name_worker: QThread | None = None
+        self._symbol_name_pending: str = ""  # combo-text being looked up
         self._window_closing = False
         self._analysis_in_progress = False
         self._last_analysis_had_error = False
@@ -340,8 +382,14 @@ class MainWindow(QMainWindow):
         self._demo_mode_label.setStyleSheet(
             "color: #e6b800; font-weight: 600; padding-left: 4px;"
         )
-        self._demo_mode_label.hide()
         self._status_bar.addWidget(self._demo_mode_label, 1)
+        # 从控制栏移下来的状态信息：AI 模式、决策徽章、agent 状态指示器
+        if hasattr(self, "_ai_mode_label"):
+            self._status_bar.addWidget(self._ai_mode_label)
+        if hasattr(self, "_decision_badge"):
+            self._status_bar.addWidget(self._decision_badge)
+        if hasattr(self, "_agent_status"):
+            self._status_bar.addPermanentWidget(self._agent_status)
         self._status_bar.showMessage("就绪")
         self._refresh_api_key_ui_state()
 
@@ -513,6 +561,16 @@ class MainWindow(QMainWindow):
         self._symbol_combo.setMinimumWidth(110)
         self._apply_data_source_symbol_placeholder()
         ctrl_layout.addWidget(self._symbol_combo)
+        # 品种中文名 — 跟在合约框右侧，让用户在分析前看清自己在看什么
+        self._symbol_name_label = QLabel("")
+        self._symbol_name_label.setObjectName("symbolNameLabel")
+        self._symbol_name_label.setStyleSheet(
+            "color: #58a6ff; font-size: 12px; font-weight: 600;"
+            "padding: 0 2px;"
+        )
+        self._symbol_name_label.setMinimumWidth(40)
+        self._symbol_name_label.setToolTip("当前品种的中文名称（来自搜索结果或内置别名）")
+        ctrl_layout.addWidget(self._symbol_name_label)
         self._populate_symbol_combo_for_source()
 
         self._symbol_alert_label = QLabel("")
@@ -552,25 +610,22 @@ class MainWindow(QMainWindow):
             "勾选后，点击提交分析将先等待当前未收盘K线走完，再抓取数据并开始分析"
         )
         self._wait_close_checkbox.stateChanged.connect(self._on_wait_close_checkbox_changed)
-        ctrl_layout.addWidget(self._wait_close_checkbox)
 
         self._wait_close_countdown_label = QLabel("")
         self._wait_close_countdown_label.setObjectName("mutedLabel")
         self._wait_close_countdown_label.setMinimumWidth(100)
-        ctrl_layout.addWidget(self._wait_close_countdown_label)
 
         self._submit_btn = QPushButton("提交分析")
         self._submit_btn.setObjectName("primaryButton")
         self._submit_btn.setMinimumWidth(100)
         self._submit_btn.clicked.connect(self._on_submit_analysis)
         ctrl_layout.addWidget(self._submit_btn)
-        # Agent execution-status indicator — prominent feedback right next to
-        # the submit button so the user sees what the agent is doing.
+        # Agent execution-status indicator — moved to the bottom status bar;
+        # creation kept here so it exists before status bar setup runs.
         from pa_agent.gui.widgets.agent_status_indicator import AgentStatusIndicator
 
         self._agent_status = AgentStatusIndicator()
         self._agent_status.set_state("idle")
-        ctrl_layout.addWidget(self._agent_status)
 
         # Incremental button is kept for programmatic use but hidden from the
         # toolbar — the submit button's label changes to "增量分析" automatically
@@ -598,7 +653,6 @@ class MainWindow(QMainWindow):
             "勾选后，每当有新的K线收盘时自动开始新一轮分析"
         )
         self._keep_analysis_checkbox.stateChanged.connect(self._on_keep_analysis_checkbox_changed)
-        ctrl_layout.addWidget(self._keep_analysis_checkbox)
 
         # Reset persisted keep_analysis flag so future restarts also start unchecked
         if _settings is not None:
@@ -613,22 +667,18 @@ class MainWindow(QMainWindow):
             "恢复 K 线实时刷新；最右侧未收盘 K 线为浅色空心 K 线，不参与 AI 分析"
         )
         self._resume_chart_btn.clicked.connect(self._on_resume_chart_refresh)
-        ctrl_layout.addWidget(self._resume_chart_btn)
 
         self._fit_chart_btn = QPushButton("恢复图表")
         self._fit_chart_btn.setToolTip(
             "自动调整图表缩放，将 K 线和价格线适配到可视区域"
         )
         self._fit_chart_btn.clicked.connect(self._on_fit_chart)
-        ctrl_layout.addWidget(self._fit_chart_btn)
 
         self._decision_badge = QLabel("")
         self._decision_badge.setObjectName("mutedLabel")
-        ctrl_layout.addWidget(self._decision_badge)
 
         self._ai_mode_label = QLabel("")
         self._ai_mode_label.setObjectName("mutedLabel")
-        ctrl_layout.addWidget(self._ai_mode_label)
 
         outer_layout.addLayout(ctrl_layout)
 
@@ -653,6 +703,11 @@ class MainWindow(QMainWindow):
         outer_layout.addWidget(self._disclaimer_label)
 
         status_row = QHBoxLayout()
+        status_row.setSpacing(12)
+        # 从控制栏移下来的选项控件，放第二行左侧
+        status_row.addWidget(self._wait_close_checkbox)
+        status_row.addWidget(self._wait_close_countdown_label)
+        status_row.addWidget(self._keep_analysis_checkbox)
         status_row.addStretch()
         self._last_refresh_ts: float = 0.0
         self._refresh_elapsed_label = QLabel("距上次刷新: —")
@@ -678,12 +733,28 @@ class MainWindow(QMainWindow):
 
         workbench = QSplitter(Qt.Orientation.Horizontal)
 
+        # ── Chart panel: 图表工具栏 + K 线图 ────────────────────────────────
+        chart_panel = QWidget()
+        chart_panel_layout = QVBoxLayout(chart_panel)
+        chart_panel_layout.setContentsMargins(0, 0, 0, 0)
+        chart_panel_layout.setSpacing(4)
+
+        chart_toolbar = QHBoxLayout()
+        chart_toolbar.setContentsMargins(2, 0, 2, 0)
+        chart_toolbar.setSpacing(6)
+        chart_toolbar.addWidget(self._resume_chart_btn)
+        chart_toolbar.addWidget(self._fit_chart_btn)
+        chart_toolbar.addStretch()
+        chart_panel_layout.addLayout(chart_toolbar)
+
         self._chart_widget = ChartWidget()
         self._chart_widget.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self._apply_chart_display_settings()
-        workbench.addWidget(self._chart_widget)
+        chart_panel_layout.addWidget(self._chart_widget, stretch=1)
+
+        workbench.addWidget(chart_panel)
 
         self._ai_sidebar.setMinimumWidth(400)
         workbench.addWidget(self._ai_sidebar)
@@ -1133,11 +1204,11 @@ class MainWindow(QMainWindow):
         data_source = getattr(self._ctx, "data_source", None)
         current = self._symbol_combo.currentText().strip()
         kind = self._current_data_source_kind()
-
         # 东方财富期货: 两级选择 (品种 → 合约)
         if kind == "eastmoney_futures" and data_source is not None:
             self._populate_futures_variety_and_contracts(data_source, current)
             self._apply_data_source_symbol_placeholder()
+            self._update_symbol_name_label()
             return
 
         symbols: list[str] = []
@@ -1163,6 +1234,7 @@ class MainWindow(QMainWindow):
             self._symbol_combo.setCurrentText(default)
         self._symbol_combo.blockSignals(False)
         self._apply_data_source_symbol_placeholder()
+        self._update_symbol_name_label()
 
     def _populate_futures_variety_and_contracts(
         self, data_source: object, current: str
@@ -1235,6 +1307,7 @@ class MainWindow(QMainWindow):
             self._symbol_combo.addItems(contracts)
             self._symbol_combo.setCurrentIndex(0)  # 默认主力
         self._symbol_combo.blockSignals(False)
+        self._update_symbol_name_label()
 
     def _populate_timeframe_combo_for_source(self) -> None:
         data_source = getattr(self._ctx, "data_source", None)
@@ -1407,18 +1480,20 @@ class MainWindow(QMainWindow):
     # ── Slots ─────────────────────────────────────────────────────────────────
 
     def _on_symbol_combo_text_changed(self, _text: str = "") -> None:
-        """Update the alert label while the user is typing; no longer triggers subscription."""
+        """Update the alert + name labels while the user is typing; no subscription change."""
         self._update_symbol_data_alert()
+        self._update_symbol_name_label()
         # Debounce the alert refresh for slow typists
         if self._symbol_switch_timer is not None:
             self._symbol_switch_timer.start()
 
     def _on_symbol_combo_editing_finished(self) -> None:
-        """Update the alert label when the user leaves the symbol field.
+        """Update the alert + name labels when the user leaves the symbol field.
         No longer triggers a subscription change — use 「获取数据」 or 「提交分析」."""
         if self._symbol_switch_timer is not None:
             self._symbol_switch_timer.stop()
         self._update_symbol_data_alert()
+        self._update_symbol_name_label()
 
     def _on_symbol_search_clicked(self) -> None:
         """Open the stock-code search popup and fill the chosen code into the symbol combo.
@@ -1457,6 +1532,11 @@ class MainWindow(QMainWindow):
             self._symbol_combo.addItem(fill)
             self._symbol_combo.setCurrentText(fill)
         self._symbol_combo.blockSignals(False)
+        # Cache the chosen name so the label shows it immediately; the combo
+        # was filled with blockSignals on, so _on_symbol_combo_text_changed
+        # never fired.
+        if name and name != code:
+            self._symbol_name_cache[fill] = name
         self._on_symbol_combo_editing_finished()
 
         label = f"{code} {name}" if name and name != code else code
@@ -1538,6 +1618,133 @@ class MainWindow(QMainWindow):
             "（含后缀，如 XAUUSDm）。"
         )
         label.show()
+
+
+    # ── Symbol Chinese-name resolution ────────────────────────────────────────
+
+    def _update_symbol_name_label(self) -> None:
+        """Refresh the Chinese-name label next to the symbol combo.
+
+        Resolution order: in-memory cache → futures variety combo → TV alias
+        reverse-lookup → async Sina search (A股/东方财富).  Unknown symbols
+        show an empty label rather than a placeholder, so the UI stays clean.
+        """
+        label = getattr(self, "_symbol_name_label", None)
+        if label is None:
+            return
+        symbol = self._symbol_combo.currentText().strip()
+        if not symbol:
+            label.setText("")
+            return
+
+        # 1) Cache hit (search dialog / prior lookup populated it).
+        cached = self._symbol_name_cache.get(symbol)
+        if cached:
+            label.setText(cached)
+            return
+
+        kind = self._current_data_source_kind()
+
+        # 2) 东方财富期货: 品种下拉框已含中文名 (如 "AO0 氧化铝")。
+        if kind == "eastmoney_futures":
+            name = self._futures_symbol_name(symbol)
+            if name:
+                self._symbol_name_cache[symbol] = name
+                label.setText(name)
+                return
+            label.setText("")
+            return
+
+        # 3) TradingView: 反查内置/用户别名 (exchange, symbol) -> name。
+        if kind == "tradingview":
+            name = self._tv_symbol_name(symbol)
+            if name:
+                self._symbol_name_cache[symbol] = name
+                label.setText(name)
+                return
+            # TV 名称输入 (中文) 时，combo 里就是名称本身 — 直接显示。
+            from pa_agent.data.market_defaults import is_partial_tv_symbol_input
+            from pa_agent.data.tv_symbol_lookup import is_tv_name_input
+            if is_tv_name_input(symbol) and not is_partial_tv_symbol_input(symbol):
+                label.setText(symbol)
+                return
+            label.setText("")
+            return
+
+        # 4) A 股 / 其它：异步走 Sina suggest 接口。
+        label.setText("")
+        self._schedule_symbol_name_lookup(symbol, kind)
+
+    def _futures_symbol_name(self, symbol: str) -> str:
+        """Derive the Chinese name for a futures contract from the variety combo."""
+        variety_text = ""
+        if hasattr(self, "_variety_combo") and self._variety_combo.isVisible():
+            variety_text = self._variety_combo.currentText().strip()
+        # 品种下拉框形如 "AO0 氧化铝"。
+        if variety_text:
+            parts = variety_text.split(None, 1)
+            if len(parts) == 2:
+                return parts[1]
+        # 回退: 从合约代码前缀查内置品种表。
+        try:
+            import re as _re
+
+            from pa_agent.data.eastmoney_futures_source import (
+                _SYMBOL_NAMES,
+                variety_prefix,
+            )
+
+            raw = symbol.split()[0] if symbol.split() else symbol
+            # 主力代码 (AO0) 用 variety_prefix；具体月份合约 (AO2608) 取开头字母。
+            m = _re.match(r"^([A-Za-z]{1,3})", raw)
+            prefix = m.group(1).upper() if m else variety_prefix(raw)
+            for code, name in _SYMBOL_NAMES.items():
+                if variety_prefix(code) == prefix:
+                    return name
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    def _tv_symbol_name(self, symbol: str) -> str:
+        """Reverse-lookup a TradingView code to its alias name."""
+        from pa_agent.data.tv_symbol_lookup import lookup_name_by_tv_symbol
+
+        exchange = self._tv_exchange_text() if hasattr(self, "_tv_exchange_text") else ""
+        return lookup_name_by_tv_symbol(exchange, symbol) or ""
+
+    def _schedule_symbol_name_lookup(self, symbol: str, kind: str) -> None:
+        """Spawn a background Sina search to resolve ``symbol`` to a name."""
+        if not symbol:
+            return
+        # Only A股 / 东方财富 sources are reliably resolvable via Sina.
+        if kind not in ("eastmoney", "akshare", "tushare"):
+            return
+        # Drop a still-running worker; single in-flight lookup at a time.
+        prev = self._symbol_name_worker
+        if prev is not None and _qobject_alive(prev):
+            try:
+                prev.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+            prev.quit()
+        self._symbol_name_pending = symbol
+        # 东方财富 combo 存 fullcode (sh000001)；Sina 用 fullcode 匹配。
+        match_field = "fullcode" if kind == "eastmoney" else "code"
+        worker = _SymbolNameWorker(symbol, match_field, self)
+        worker.name_ready.connect(self._on_symbol_name_ready)
+        worker.failed.connect(lambda _err: None)
+        self._symbol_name_worker = worker
+        worker.start()
+
+    def _on_symbol_name_ready(self, symbol_key: str, name: str) -> None:
+        """Cache + display a name resolved by the background worker."""
+        self._symbol_name_cache[symbol_key] = name
+        # Only update the label if the user hasn't moved on to another symbol.
+        current = self._symbol_combo.currentText().strip()
+        if current == symbol_key:
+            label = getattr(self, "_symbol_name_label", None)
+            if label is not None:
+                label.setText(name)
 
     def _analysis_bar_count(self) -> int:
         """Closed-bar count for AI analysis and chart fetch (from settings)."""
@@ -2754,6 +2961,7 @@ class MainWindow(QMainWindow):
             self._tf_combo.setCurrentText(meta.timeframe)
         finally:
             self._symbol_combo.blockSignals(False)
+            self._update_symbol_name_label()
             self._tf_combo.blockSignals(False)
 
         try:

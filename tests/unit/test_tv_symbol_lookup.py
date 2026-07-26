@@ -12,6 +12,7 @@ from pa_agent.data.market_defaults import (
 from pa_agent.data.tradingview import TradingViewSource
 from pa_agent.data.tv_symbol_lookup import (
     TvSymbolNotFoundError,
+    lookup_name_by_tv_symbol,
     lookup_tv_symbol_by_name,
     resolve_tv_symbol_name,
 )
@@ -64,3 +65,17 @@ def test_resolve_tv_pair_hk_auto() -> None:
 def test_unknown_name_raises() -> None:
     with pytest.raises(TvSymbolNotFoundError):
         resolve_tv_symbol_name("不存在的公司_xyz")
+
+
+def test_lookup_name_by_tv_symbol_reverses_alias() -> None:
+    """(exchange, symbol) -> 中文名 反查; UI 用它显示品种中文名."""
+    assert lookup_name_by_tv_symbol("HKEX", "1810") == "小米"
+    assert lookup_name_by_tv_symbol("SSE", "600519") == "贵州茅台"
+    assert lookup_name_by_tv_symbol("SZSE", "000001") == "平安银行"
+    # 未知代码返回 None（UI 显示空标签，不报错）
+    assert lookup_name_by_tv_symbol("HKEX", "99999") is None
+    # exchange 未知时回退到 symbol-only 匹配
+    assert lookup_name_by_tv_symbol("", "1810") == "小米"
+    # 大小写不敏感
+    assert lookup_name_by_tv_symbol("hkex", "1810") == "小米"
+

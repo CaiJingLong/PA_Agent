@@ -162,6 +162,25 @@ def lookup_tv_symbol_by_name(name: str) -> tuple[str, str] | None:
                 return pair
     return None
 
+def lookup_name_by_tv_symbol(exchange: str, symbol: str) -> str | None:
+    """Return the Chinese/English name for a TV ``(exchange, symbol)`` pair.
+
+    Reverse of :func:`lookup_tv_symbol_by_name`.  When several aliases map to
+    the same pair, the first one declared wins (the canonical short name).
+    """
+    ex = (exchange or "").strip().upper()
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return None
+    for alias_key, pair in _all_aliases().items():
+        if pair[0].upper() == ex and pair[1].upper() == sym:
+            return alias_key
+    # Fall back to symbol-only match (exchange unknown / AUTO).
+    for alias_key, pair in _all_aliases().items():
+        if pair[1].upper() == sym:
+            return alias_key
+    return None
+
 
 def resolve_tv_symbol_name(name: str) -> tuple[str, str]:
     """Resolve name to ``(exchange, symbol)``; raise if unknown."""

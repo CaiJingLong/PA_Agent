@@ -124,6 +124,22 @@ def _is_openclaw_agent_model(model: str) -> bool:
     )
 
 
+def _is_openai_reasoning_model(model: str) -> bool:
+    """True for OpenAI GPT-5 / o-series reasoning models.
+
+    These models require ``max_completion_tokens`` (not the deprecated
+    ``max_tokens``) and do not expose reasoning tokens via the API.
+    """
+    m = (model or "").lower()
+    return (
+        m.startswith("gpt-5")
+        or m.startswith("o1")
+        or m.startswith("o3")
+        or m.startswith("o4")
+        or "-reason" in m
+    )
+
+
 def supports_kv_prefix_chain(settings: AIProviderSettings | None) -> bool:
     """Whether Stage 2 may chain after Stage 1 messages for DeepSeek KV prefix cache.
 
@@ -192,6 +208,8 @@ def _is_minimax(base_url: str) -> bool:
 _PACKY_CLAUDE_MAX_OUTPUT_TOKENS = 128_000
 # DeepSeek API: max_tokens must be in [1, 393216].
 _DEEPSEEK_MAX_OUTPUT_TOKENS = 393_216
+# GPT-5 / o-series: max_tokens is deprecated; use max_completion_tokens (≤128k).
+_GPT5_MAX_OUTPUT_TOKENS = 128_000
 
 
 def _model_uses_claude_adaptive(model: str) -> bool:
@@ -288,14 +306,16 @@ def _prepare_api_messages(
 
 
 def _provider_max_output_tokens(settings: AIProviderSettings) -> int:
-    """Per-gateway completion cap (max_tokens); avoids 400 from provider limits."""
-    model = (settings.model or "").lower()
-    if _is_packyapi(settings.base_url) and "claude" in model:
+    """Per-gateway completion cap; avoids 400 from provider limits."""
+    model = settings.model or ""
+    if _is_packyapi(settings.base_url) and "claude" in model.lower():
         return _PACKY_CLAUDE_MAX_OUTPUT_TOKENS
     if _is_deepseek_native(settings.base_url):
         return _DEEPSEEK_MAX_OUTPUT_TOKENS
     if _is_mimo(settings):
         return mimo_max_output_tokens(settings.model)
+    if _is_openai_reasoning_model(model):
+        return _GPT5_MAX_OUTPUT_TOKENS
     return _PRACTICAL_UNLIMITED_MAX_TOKENS
 
 
@@ -469,11 +489,13 @@ class DeepSeekClient:
         )
 
         t0 = time.monotonic()
+        _gpt5 = _is_openai_reasoning_model(self._settings.model)
         create_kwargs: dict[str, Any] = {
             "model": _effective_api_model(self._settings),
             "messages": api_messages,
             "timeout": timeout_s,
-            "max_tokens": _max_tokens,
+            # GPT-5/o-series reject deprecated max_tokens; use max_completion_tokens.
+            "max_completion_tokens" if _gpt5 else "max_tokens": _max_tokens,
         }
         if extra_body:
             create_kwargs["extra_body"] = extra_body
@@ -660,7 +682,8 @@ class DeepSeekClient:
                 "model": _effective_api_model(self._settings),
                 "messages": api_messages,
                 "timeout": timeout_s,
-                "max_tokens": _max_tokens,
+                # GPT-5/o-series reject deprecated max_tokens; use max_completion_tokens.
+                "max_completion_tokens" if _is_openai_reasoning_model(self._settings.model) else "max_tokens": _max_tokens,
                 "stream": True,
                 "stream_options": {"include_usage": True},
             }
@@ -782,7 +805,7 @@ class DeepSeekClient:
                 self._settings.model,
                 self._settings.base_url,
             )
-        if _thinking_on and len(reasoning_content) < 80:
+        if _thinking_on and len(reasoning_content) < 80 and not _is_openai_reasoning_model(self._settings.model):
             self._log.warning(
                 "Thinking enabled but reasoning_content is very short (%d chars). "
                 "For KKAI/Claude use reasoning_effort (not DeepSeek extra_body); "

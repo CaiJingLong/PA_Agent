@@ -222,6 +222,12 @@ QLabel#mutedLabel {
     color: #8b949e;
     font-size: 11px;
 }
+QLabel#symbolNameLabel {
+    color: #58a6ff;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 0 2px;
+}
 QLabel#stageHeader {
     font-size: 14px;
     font-weight: bold;
