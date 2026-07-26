@@ -1549,7 +1549,8 @@ class MainWindow(QMainWindow):
     def _set_agent_status(self, state: str) -> None:
         """Update the agent execution-status indicator next to the submit button."""
         indicator = getattr(self, "_agent_status", None)
-        logger.info("[AgentStatus] state=%s indicator=%s", state, bool(indicator))
+        logger.info("[AgentStatus] state=%s indicator=%s alive=%s", state,
+                    bool(indicator), _qobject_alive(indicator) if indicator else False)
         if indicator is not None and _qobject_alive(indicator):
             indicator.set_state(state)
 
@@ -2922,7 +2923,9 @@ class MainWindow(QMainWindow):
 
     def _begin_submit_analysis(self, *, force_incremental: bool) -> None:
         """Shared entry for normal and forced-incremental submit buttons."""
+        logger.info("[AgentStatus] _begin_submit_analysis called, force_incremental=%s", force_incremental)
         if not self._can_submit():
+            logger.info("[AgentStatus] _can_submit() returned False — aborting")
             return
 
         # Clear auto-incremental flag — user initiated analysis manually
@@ -2944,6 +2947,7 @@ class MainWindow(QMainWindow):
             cur_symbol = str(getattr(data_source, "_symbol", "") or "").strip()
             cur_tf = str(getattr(data_source, "_timeframe", "") or "").strip()
             if new_symbol and (new_symbol != cur_symbol or new_tf != cur_tf):
+                logger.info("[AgentStatus] symbol mismatch new=%s cur=%s — switching, returning", new_symbol, cur_symbol)
                 # Symbol/tf changed since last subscribe — re-subscribe first.
                 # The switch flow restarts the refresh loop; the user clicks
                 # 「提交分析」 again once data arrives.  Show a status so the
