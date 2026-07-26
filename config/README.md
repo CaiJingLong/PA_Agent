@@ -39,6 +39,7 @@
 | `provider.thinking` | bool | `true` | 是否启用思考/推理类扩展参数（依模型与网关而定）。关闭可 3–5 倍提速但分析质量下降 |
 | `provider.reasoning_effort` | string | `"high"` | 推理深度：`low` / `medium` / `high` / `max` |
 | `provider.context_window` | int | `2000000` | 用于上下文占用提示的窗口大小（tokens） |
+| `provider.provider_type` | string | `"auto"` | 路由类型：`auto`（按 model 别名/base_url 推断）/ `openai_compat`（OpenAI 兼容网关）/ `anthropic_native`（Anthropic 原生 Messages API）/ `cursor_sdk`（Cursor SDK）。`auto` 时识别 `anthropic/<model>` 别名走原生路由 |
 
 ### general — 通用设置
 

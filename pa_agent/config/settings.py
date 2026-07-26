@@ -7,12 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
 DataSourceKind = Literal["mt5", "tradingview", "akshare", "eastmoney", "eastmoney_futures", "tushare"]
 NormalizationMode = Literal["strict", "lenient"]
+ProviderType = Literal["auto", "openai_compat", "anthropic_native", "cursor_sdk"]
 
 
 class AIProviderSettings(BaseModel):
-    """AI provider connection and behaviour settings."""
-    model_config = ConfigDict(extra="ignore")
-
     model: str = "openclaw_wb/deepseek-v4-flash"
     base_url: str = "https://api.deepseek.com"
     api_key: str = ""
@@ -20,6 +18,7 @@ class AIProviderSettings(BaseModel):
     thinking: bool = True
     reasoning_effort: Literal["low", "medium", "high", "max"] = "high"
     context_window: int = 2_000_000
+    provider_type: ProviderType = "auto"
 
 
 class PromptSettings(BaseModel):

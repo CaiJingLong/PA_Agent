@@ -5,7 +5,8 @@
     "api_key_encrypted": "",
     "thinking": true,
     "reasoning_effort": "high",
-    "context_window": 128000
+    "context_window": 128000,
+    "provider_type": "auto"
   },
   "general": {
     "analysis_bar_count": 100,

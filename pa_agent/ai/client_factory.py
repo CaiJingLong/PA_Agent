@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from pa_agent.ai.anthropic_connector import is_anthropic_native_model
 from pa_agent.ai.cursor_connector import is_openclaw_cs_model
 from pa_agent.config.settings import AIProviderSettings
 
@@ -13,9 +14,25 @@ def create_ai_client(
     settings: AIProviderSettings,
     logger_: logging.Logger | None = None,
 ) -> Any:
-    """Return CursorSdkClient for ``openclaw_cs*``, else DeepSeekClient."""
+    """Return the right client for the configured provider route.
+
+    Routing priority:
+    1. Explicit ``provider_type`` overrides (anthropic_native / cursor_sdk / openai_compat).
+    2. ``auto`` falls back to model-alias inference:
+       - ``openclaw_cs*`` -> Cursor SDK
+       - ``anthropic*`` -> Anthropic native
+       - else -> OpenAI-compatible (DeepSeek client)
+    """
     log = logger_ or logging.getLogger(__name__)
-    if is_openclaw_cs_model(settings.model):
+    ptype = settings.provider_type
+
+    if ptype == "anthropic_native" or (ptype == "auto" and is_anthropic_native_model(settings.model)):
+        from pa_agent.ai.anthropic_client import AnthropicClient
+
+        log.info("AI client route: Anthropic native (model=%s)", settings.model)
+        return AnthropicClient(settings=settings, logger_=log)
+
+    if ptype == "cursor_sdk" or (ptype == "auto" and is_openclaw_cs_model(settings.model)):
         from pa_agent.ai.cursor_sdk_client import CursorSdkClient
 
         log.info("AI client route: Cursor SDK (model=%s)", settings.model)

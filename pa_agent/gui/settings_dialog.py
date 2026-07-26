@@ -29,6 +29,10 @@ from pa_agent.ai.cursor_connector import (
     is_openclaw_cs_model,
     should_use_cursor_provider,
 )
+from pa_agent.ai.anthropic_connector import (
+    is_anthropic_native_model,
+    should_use_anthropic_provider,
+)
 from pa_agent.ai.qclaw_connector import (
     detect_qclaw,
     is_openclaw_model,
@@ -95,6 +99,10 @@ class SettingsDialog(QDialog):
         self._reasoning_effort_combo = QComboBox()
         self._reasoning_effort_combo.addItems(["low", "medium", "high", "max"])
         provider_form.addRow("Reasoning Effort:", self._reasoning_effort_combo)
+
+        self._provider_type_combo = QComboBox()
+        self._provider_type_combo.addItems(["auto", "openai_compat", "anthropic_native", "cursor_sdk"])
+        provider_form.addRow("Provider Type:", self._provider_type_combo)
 
         self._api_key_help_btn = QPushButton("小白点这里！获取程序无限Token，无限分析")
         self._api_key_help_btn.clicked.connect(self._show_unlimited_token_info)
@@ -274,6 +282,9 @@ class SettingsDialog(QDialog):
         idx = self._reasoning_effort_combo.findText(p.reasoning_effort)
         if idx >= 0:
             self._reasoning_effort_combo.setCurrentIndex(idx)
+        pt_idx = self._provider_type_combo.findText(p.provider_type)
+        if pt_idx >= 0:
+            self._provider_type_combo.setCurrentIndex(pt_idx)
 
         self._analysis_bar_count_spin.setValue(g.analysis_bar_count)
         self._refresh_interval_spin.setValue(g.refresh_interval_ms)
@@ -384,6 +395,15 @@ class SettingsDialog(QDialog):
             preferred_model=preferred_model or None,
         )
 
+
+    def _apply_anthropic_provider(self, *, preferred_model: str = "") -> str | None:
+        """Apply Anthropic native route. Returns error text, or None."""
+        from pa_agent.ai.anthropic_connector import apply_anthropic_provider_to_settings
+
+        return apply_anthropic_provider_to_settings(
+            self._settings,
+            preferred_model=preferred_model or None,
+        )
     def _apply_workbuddy_provider(self, *, preferred_model: str = "") -> str | None:
         """Detect WorkBuddy and write provider fields. Returns error text, or None."""
         from pa_agent.ai.workbuddy_connector import apply_workbuddy_provider_to_settings
@@ -400,9 +420,17 @@ class SettingsDialog(QDialog):
         model = self._model_edit.text().strip()
         base_url = self._base_url_edit.text().strip()
         api_key = self._api_key_edit.text().strip()
+        provider_type = self._provider_type_combo.currentText()
 
-        # Explicit model aliases win over stale base_url (openclaw_wb before openclaw).
-        if is_openclaw_wb_model(model) or should_use_workbuddy_provider(model, base_url):
+        # Explicit provider_type=anthropic_native forces the Anthropic route
+        # regardless of model alias; otherwise model aliases drive routing.
+        if provider_type == "anthropic_native" or is_anthropic_native_model(model):
+            p.api_key = api_key
+            anth_err = self._apply_anthropic_provider(preferred_model=model)
+            if anth_err:
+                QMessageBox.warning(self, "Anthropic 配置异常", anth_err)
+                return
+        elif is_openclaw_wb_model(model) or should_use_workbuddy_provider(model, base_url):
             p.api_key = api_key
             wb_err = self._apply_workbuddy_provider(preferred_model=model)
             if wb_err:
@@ -433,6 +461,7 @@ class SettingsDialog(QDialog):
 
         p.thinking = self._thinking_check.isChecked()
         p.reasoning_effort = self._reasoning_effort_combo.currentText()  # type: ignore[assignment]
+        p.provider_type = provider_type  # type: ignore[assignment]
 
         g.analysis_bar_count = self._analysis_bar_count_spin.value()
         g.refresh_interval_ms = self._refresh_interval_spin.value()

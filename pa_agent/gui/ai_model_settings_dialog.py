@@ -25,6 +25,10 @@ from pa_agent.ai.cursor_connector import (
     is_openclaw_cs_model,
     should_use_cursor_provider,
 )
+from pa_agent.ai.anthropic_connector import (
+    is_anthropic_native_model,
+    should_use_anthropic_provider,
+)
 from pa_agent.ai.qclaw_connector import (
     detect_qclaw,
     is_openclaw_model,
@@ -86,6 +90,10 @@ class AIModelSettingsDialog(QDialog):
         self._reasoning_effort_combo.addItems(["low", "medium", "high", "max"])
         form.addRow("Reasoning Effort:", self._reasoning_effort_combo)
 
+        self._provider_type_combo = QComboBox()
+        self._provider_type_combo.addItems(["auto", "openai_compat", "anthropic_native", "cursor_sdk"])
+        form.addRow("Provider Type:", self._provider_type_combo)
+
         self._api_key_help_btn = QPushButton("小白点这里！获取程序无限Token，无限分析")
         self._api_key_help_btn.setStyleSheet(
             "QPushButton { font-size: 13pt; font-weight: bold; "
@@ -126,15 +134,26 @@ class AIModelSettingsDialog(QDialog):
         idx = self._reasoning_effort_combo.findText(p.reasoning_effort)
         if idx >= 0:
             self._reasoning_effort_combo.setCurrentIndex(idx)
+        pt_idx = self._provider_type_combo.findText(p.provider_type)
+        if pt_idx >= 0:
+            self._provider_type_combo.setCurrentIndex(pt_idx)
 
     def _on_save(self) -> None:
         p = self._settings.provider
         model = self._model_edit.text().strip()
         base_url = self._base_url_edit.text().strip()
         api_key = self._api_key_edit.text().strip()
+        provider_type = self._provider_type_combo.currentText()
 
-        # Explicit model aliases win over stale base_url (openclaw_wb before openclaw).
-        if is_openclaw_wb_model(model) or should_use_workbuddy_provider(model, base_url):
+        # Explicit provider_type=anthropic_native forces the Anthropic route
+        # regardless of model alias; otherwise model aliases drive routing.
+        if provider_type == "anthropic_native" or is_anthropic_native_model(model):
+            p.api_key = api_key
+            err = self._apply_anthropic_provider(preferred_model=model)
+            if err:
+                QMessageBox.warning(self, "Anthropic 配置异常", err)
+                return
+        elif is_openclaw_wb_model(model) or should_use_workbuddy_provider(model, base_url):
             p.api_key = api_key
             err = self._apply_workbuddy_provider(preferred_model=model)
             if err:
@@ -164,12 +183,12 @@ class AIModelSettingsDialog(QDialog):
 
         p.thinking = self._thinking_check.isChecked()
         p.reasoning_effort = self._reasoning_effort_combo.currentText()  # type: ignore[assignment]
+        p.provider_type = provider_type  # type: ignore[assignment]
 
         save_settings(self._settings, SETTINGS_JSON_PATH)
         self.accept()
 
     # ── 辅助 ──────────────────────────────────────────────────────────────────
-
     def focus_api_key_field(self) -> None:
         self._api_key_edit.setFocus(Qt.FocusReason.OtherFocusReason)
         self._api_key_edit.selectAll()
@@ -193,6 +212,10 @@ class AIModelSettingsDialog(QDialog):
     def _apply_workbuddy_provider(self, *, preferred_model: str = "") -> str | None:
         from pa_agent.ai.workbuddy_connector import apply_workbuddy_provider_to_settings
         return apply_workbuddy_provider_to_settings(self._settings, preferred_model=preferred_model or None)
+
+    def _apply_anthropic_provider(self, *, preferred_model: str = "") -> str | None:
+        from pa_agent.ai.anthropic_connector import apply_anthropic_provider_to_settings
+        return apply_anthropic_provider_to_settings(self._settings, preferred_model=preferred_model or None)
 
     @staticmethod
     def _validate_provider_fields(model: str, base_url: str) -> str | None:
