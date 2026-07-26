@@ -2136,6 +2136,9 @@ class MainWindow(QMainWindow):
             # frame_ready signal does not unexpectedly fire analysis.
             self._auto_incremental_pending = False
             self._update_submit_button_state()
+            # Switch finished — back to idle so the indicator does not stay
+            # stuck at "fetching" after the re-subscribe completes.
+            self._set_agent_status("idle")
 
     def _check_auto_incremental(self, symbol: str, timeframe: str) -> None:
         """After a symbol/tf switch, look for a prior record and set the
@@ -2940,6 +2943,11 @@ class MainWindow(QMainWindow):
             cur_symbol = str(getattr(data_source, "_symbol", "") or "").strip()
             cur_tf = str(getattr(data_source, "_timeframe", "") or "").strip()
             if new_symbol and (new_symbol != cur_symbol or new_tf != cur_tf):
+                # Symbol/tf changed since last subscribe — re-subscribe first.
+                # The switch flow restarts the refresh loop; the user clicks
+                # 「提交分析」 again once data arrives.  Show a status so the
+                # indicator does not sit at "空闲" while the switch runs.
+                self._set_agent_status("fetching")
                 self._on_symbol_or_tf_changed(new_symbol_raw, new_tf)
                 # Switch resets everything; user needs to click 提交分析 again
                 # once data arrives.
