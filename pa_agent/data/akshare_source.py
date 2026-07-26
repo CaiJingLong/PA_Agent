@@ -51,13 +51,21 @@ def normalize_ashare_symbol(symbol: str) -> str:
     m = _INDEX_PREFIX_RE.match(raw)
     if m:
         prefix, digits = m.group(1).lower(), m.group(2)
-        if _is_index_digits(digits):
+        if _is_index_with_prefix(prefix, digits):
             return f"{prefix}{digits}"
         return digits
     digits = re.sub(r"\D", "", raw)
     if len(digits) >= 6:
         return digits[-6:]
     return digits
+
+
+def _is_index_with_prefix(prefix: str, digits: str) -> bool:
+    if prefix == "sh" and digits.startswith("000"):
+        return True
+    if prefix == "sz" and digits.startswith("399"):
+        return True
+    return False
 
 
 def _is_index_digits(digits: str) -> bool:
@@ -86,9 +94,6 @@ def _index_symbol_for_api(symbol: str) -> str:
     sym = normalize_ashare_symbol(symbol)
     if sym.startswith(("sh", "sz")):
         return sym
-    if sym.startswith("399"):
-        return f"sz{sym}"
-    return f"sh{sym}"
 
 
 def _cn_now() -> datetime:

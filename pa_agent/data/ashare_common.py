@@ -26,14 +26,21 @@ PRESET_SYMBOLS: tuple[str, ...] = (
 
 
 def normalize_ashare_symbol(symbol: str) -> str:
-    """Normalize user input to 6-digit code or index id (sh000300)."""
+    """Normalize user input to 6-digit code or index id (sh000300).
+
+    For prefixed input (``sh000001`` / ``sz000001``) the prefix is kept only
+    when the code is an index — ``sh000001`` (上证指数) stays as
+    ``sh000001``, while ``sz000001`` (平安银行) collapses to ``000001``.
+    This is the only way to disambiguate codes like ``000001`` which map to
+    both an index (SH) and a stock (SZ).
+    """
     raw = (symbol or "").strip()
     if not raw:
         return ""
     m = _INDEX_PREFIX_RE.match(raw)
     if m:
         prefix, digits = m.group(1).lower(), m.group(2)
-        if _is_index_digits(digits):
+        if _is_index_with_prefix(prefix, digits):
             return f"{prefix}{digits}"
         return digits
     digits = re.sub(r"\D", "", raw)
@@ -42,7 +49,26 @@ def normalize_ashare_symbol(symbol: str) -> str:
     return digits
 
 
+def _is_index_with_prefix(prefix: str, digits: str) -> bool:
+    """True when ``(prefix, digits)`` is an index.
+
+    ``sh`` + ``000xxx`` → 上证指数系列 (000001 上证指数, 000300 沪深300, ...).
+    ``sz`` + ``399xxx`` → 深证指数系列 (399001 深证成指, 399006 创业板指, ...).
+    Stocks never use these prefix+code combinations.
+    """
+    if prefix == "sh" and digits.startswith("000"):
+        return True
+    if prefix == "sz" and digits.startswith("399"):
+        return True
+    return False
+
+
 def _is_index_digits(digits: str) -> bool:
+    """Bare 6-digit codes that are unambiguously indices (no prefix).
+
+    ``000001`` is NOT here: without a prefix it is ambiguous (上证指数 vs
+    平安银行) and defaults to stock.  Use ``sh000001`` for the index.
+    """
     return digits in {
         "000300",
         "000016",

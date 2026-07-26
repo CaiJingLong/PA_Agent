@@ -520,6 +520,11 @@ class MainWindow(QMainWindow):
         self._symbol_alert_label.setWordWrap(True)
         self._symbol_alert_label.hide()
         ctrl_layout.addWidget(self._symbol_alert_label)
+        self._symbol_search_btn = QPushButton("🔍 搜索")
+        self._symbol_search_btn.setObjectName("symbolSearchButton")
+        self._symbol_search_btn.setToolTip("按代码或名称搜索股票/指数/期货，并填入合约框")
+        self._symbol_search_btn.clicked.connect(self._on_symbol_search_clicked)
+        ctrl_layout.addWidget(self._symbol_search_btn)
 
         # Timeframe
         ctrl_layout.addWidget(QLabel("周期:"))
@@ -1405,6 +1410,70 @@ class MainWindow(QMainWindow):
         if self._symbol_switch_timer is not None:
             self._symbol_switch_timer.stop()
         self._update_symbol_data_alert()
+
+    def _on_symbol_search_clicked(self) -> None:
+        """Open the stock-code search popup and fill the chosen code into the symbol combo.
+
+        The fill value depends on the active data source:
+        - East Money A-share: ``fullcode`` (``sh000001`` / ``sz000001``) so the
+          source can distinguish indices from stocks sharing the same 6 digits.
+        - TradingView: ``code`` into the symbol combo + set the exchange combo
+          (SH→SSE, SZ→SZSE, HK→HKEX, US→NASDAQ).
+        - Others: ``code``.
+        """
+        from pa_agent.gui.symbol_search_dialog import open_symbol_search_dialog
+
+        kind = self._current_data_source_kind()
+        initial = self._symbol_combo.currentText().strip()
+        result = open_symbol_search_dialog(self, initial=initial, data_source_kind=kind)
+        if not result:
+            return
+
+        code = str(result.get("code", ""))
+        fullcode = str(result.get("fullcode", "")) or code
+        market = str(result.get("market", ""))
+        name = str(result.get("name", ""))
+
+        if kind == "eastmoney":
+            fill = fullcode  # sh000001 / sz000001 — preserves index vs stock
+        elif kind == "tradingview":
+            self._apply_search_tv_exchange(market)
+            fill = code
+        else:
+            fill = code
+
+        self._symbol_combo.blockSignals(True)
+        self._symbol_combo.setCurrentText(fill)
+        if self._symbol_combo.findText(fill) < 0:
+            self._symbol_combo.addItem(fill)
+            self._symbol_combo.setCurrentText(fill)
+        self._symbol_combo.blockSignals(False)
+        self._on_symbol_combo_editing_finished()
+
+        label = f"{code} {name}" if name and name != code else code
+        self._status_bar.showMessage(f"已填入 {label}，点击「获取数据」生效", 4000)
+
+    def _apply_search_tv_exchange(self, market: str) -> None:
+        """Set the TV exchange combo from a search-result market label."""
+        exchange_map = {
+            "SH": "SSE",
+            "SZ": "SZSE",
+            "HK": "HKEX",
+            "US": "NASDAQ",
+        }
+        ex = exchange_map.get(market)
+        if not ex:
+            return
+        idx = self._tv_exchange_combo.findData(ex)
+        if idx >= 0:
+            self._tv_exchange_combo.blockSignals(True)
+            self._tv_exchange_combo.setCurrentIndex(idx)
+            self._tv_exchange_combo.blockSignals(False)
+            # Persist + apply to source without triggering a resubscribe; the
+            # user clicks 「获取数据」 to actually start fetching.
+            self._persist_tradingview_exchange()
+            data_source = getattr(self._ctx, "data_source", None)
+            self._apply_tv_exchange_to_source(data_source)
 
     def _flush_deferred_symbol_switch(self) -> None:
         pending = self._pending_symbol_switch
