@@ -415,7 +415,13 @@ class MainWindow(QMainWindow):
         _general_action.triggered.connect(self._open_general_settings_dialog)
         menu_bar.addAction(_general_action)
 
-        # 4. 演示模式 — 保留下拉菜单
+        # 4. 历史记录 — 点击弹对话框，可复原当时的查询信息
+        _history_action = QAction("历史记录", self)
+        _history_action.triggered.connect(self._open_history_dialog)
+        menu_bar.addAction(_history_action)
+
+        # 5. 演示模式 — 保留下拉菜单
+
         demo_menu = menu_bar.addMenu("演示模式")
         self._demo_manual_action = QAction("手动选择记录…", self)
         self._demo_manual_action.triggered.connect(lambda: self._on_demo_menu_action("manual"))
@@ -1885,6 +1891,20 @@ class MainWindow(QMainWindow):
         self._keep_analysis_last_closed_ts = None
         self._set_chart_refresh_paused(False)
         self._start_refresh_loop()
+        self._show_fetch_status_with_name()
+
+    def _show_fetch_status_with_name(self) -> None:
+        """Show a status-bar message with the current symbol and its Chinese name."""
+        symbol = self._symbol_combo.currentText().strip()
+        name = ""
+        label = getattr(self, "_symbol_name_label", None)
+        if label is not None:
+            name = label.text().strip()
+        tf = self._tf_combo.currentText().strip()
+        if name:
+            self._status_bar.showMessage(f"正在获取 {symbol} ({name}) {tf} 数据…")
+        else:
+            self._status_bar.showMessage(f"正在获取 {symbol} {tf} 数据…")
 
     def _ensure_refresh_loop_running(self) -> None:
         """Start data fetch automatically if RefreshLoop is not already running.
@@ -3988,6 +4008,14 @@ class MainWindow(QMainWindow):
 
     def _on_record_ready_impl(self, record: Any) -> None:
         self._last_analysis_record = record
+        # ── Append to markdown history (best-effort, never blocks UI) ────────
+        try:
+            from pa_agent.records.history_writer import append_history_entry
+            from pa_agent.records.pending_writer import _build_basename
+            pending_name = _build_basename(record) + ".json"
+            append_history_entry(record, pending_name)
+        except Exception as _hist_exc:
+            logger.debug("history write skipped: %s", _hist_exc)
         import json as _json
 
         exc_info = getattr(record, "exception", None)
@@ -4566,6 +4594,157 @@ class MainWindow(QMainWindow):
             self._ctx.settings = settings
             self._ai_sidebar.bind_settings(settings)
             self._apply_chart_display_settings()
+
+
+    def _open_history_dialog(self) -> None:
+        """打开历史记录对话框, 选中后复原当时的查询信息."""
+        from pa_agent.gui.history_dialog import open_history_dialog
+
+        entry = open_history_dialog(self)
+        if entry is None:
+            return
+        self._restore_from_history(entry)
+
+    def _restore_from_history(self, entry: Any) -> None:
+        """Load the pending JSON linked by *entry* and restore the full result.
+
+        Unlike demo-mode replay (which re-streams reasoning token-by-token on a
+        timer), this path populates every panel instantly with the final
+        result: chart, Stage1/Stage2 prompts + reasoning + JSON, decision tree,
+        decision-flow viz, decision panel, future-trend panel, summary strip.
+        """
+        from pathlib import Path
+
+        from pa_agent.config.paths import RECORDS_PENDING_DIR
+        from pa_agent.demo.record_loader import frame_from_record_klines, try_load_analysis_record
+
+        record_file = getattr(entry, "record_file", "") or ""
+        if not record_file:
+            QMessageBox.warning(self, "历史记录", "该条记录未关联磁盘文件, 无法复原.")
+            return
+
+        path = RECORDS_PENDING_DIR / record_file
+        if not path.exists():
+            QMessageBox.warning(
+                self,
+                "历史记录",
+                f"记录文件不存在:\n{path}\n可能已被移动或删除.",
+            )
+            return
+
+        record = try_load_analysis_record(path)
+        if record is None:
+            QMessageBox.warning(self, "历史记录", f"记录文件无法解析:\n{record_file}")
+            return
+
+        # Stop any running analysis / refresh before restoring.
+        if self._worker is not None and self._worker.isRunning():
+            if self._cancel_token is not None:
+                self._cancel_token.set()
+            self._worker.wait(_WORKER_JOIN_TIMEOUT_MS)
+            self._worker = None
+        self._stop_refresh_loop()
+        # Leave a prior demo session cleanly.
+        if getattr(self, "_demo_mode", False):
+            self._exit_demo_mode(silent=True)
+
+        meta = record.meta
+        # Restore symbol + timeframe selectors (block signals to avoid side effects).
+        self._symbol_combo.blockSignals(True)
+        self._tf_combo.blockSignals(True)
+        try:
+            self._symbol_combo.setCurrentText(meta.symbol)
+            self._tf_combo.setCurrentText(meta.timeframe)
+        finally:
+            self._symbol_combo.blockSignals(False)
+            self._tf_combo.blockSignals(False)
+        if hasattr(self, "_update_symbol_name_label"):
+            self._update_symbol_name_label()
+
+        # Build frame from persisted K-lines and push into chart.
+        try:
+            frame = frame_from_record_klines(
+                record.kline_data,
+                symbol=meta.symbol,
+                timeframe=meta.timeframe,
+                snapshot_ts_local_ms=meta.timestamp_local_ms,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "历史记录", f"无法构建K线快照:\n{exc}")
+            return
+
+        # Enter a demo-like UI state (paused chart, disabled controls) but without
+        # starting the timed DemoReplayer — we fill panels directly below.
+        self._demo_mode = True
+        self._demo_mode_kind = "manual"
+        self._demo_auto_next_armed = False
+        self._demo_record_path = str(Path(path))
+        self._demo_btn.setText("退出演示模式")
+        if hasattr(self, "_demo_exit_action"):
+            self._demo_exit_action.setEnabled(True)
+        if hasattr(self, "_demo_manual_action"):
+            self._demo_manual_action.setEnabled(False)
+        if hasattr(self, "_demo_auto_action"):
+            self._demo_auto_action.setEnabled(False)
+        ds_combo = getattr(self, "_data_source_combo", None)
+        if ds_combo is not None:
+            ds_combo.setEnabled(False)
+        self._sync_tv_exchange_visibility()
+
+        self._last_analysis_frame = frame
+        self._chart_widget.reset()
+        self._chart_widget.set_frame_now(frame, fit_view=True)
+        self._set_chart_refresh_paused(True)
+
+        name = Path(path).name
+        self._demo_mode_label.setText(f"历史复原 · {name}")
+        self._demo_mode_label.show()
+        self._decision_badge.setText("复原中…")
+
+        # Clear all panels (same as _enter_demo_mode) before filling.
+        self._ai_sidebar.focus_stream()
+        panel = self._stream_panel
+        panel.clear()
+        panel.on_analysis_started()
+        panel.set_input_enabled(False)
+        self._debug_widget.clear()
+        self._decision_tree_panel.clear()
+        self._decision_flow_viz_panel.clear()
+        self._decision_panel.clear()
+        self._future_trend_panel.clear()
+
+        from pa_agent.ai.prompt_assembler import stage1_prompt_txt_files
+
+        self._prompt_files_panel.clear()
+        self._prompt_files_panel.set_stage1_files(stage1_prompt_txt_files())
+        self._prompt_files_panel.set_extras(stage1_builtin=True)
+
+        # Stage 2 strategy files (instant, no replayer).
+        strategy = list(record.strategy_files_used or [])
+        if strategy:
+            self._on_stage2_files_ready(strategy)
+
+        # Push the full record into debug + stream + decision panels at once.
+        # _on_record_ready_impl fills debug turns, stream show_stage_result,
+        # decision panel, decision tree, future trend, prompt-files panel.
+        self._on_record_ready(record)
+
+        # _on_analysis_finished fills chart decision overlay, decision panel,
+        # future trend, decision tree, summary strip, decision badge.
+        decision = record.stage2_decision or {}
+        self._on_analysis_finished(decision if isinstance(decision, dict) else {})
+
+        self._analysis_in_progress = False
+        self._update_submit_button_state()
+        self._decision_badge.setText(
+            f"复原: {decision.get('decision', {}).get('order_type', '—')}"
+            if isinstance(decision, dict) else "复原"
+        )
+        self._status_bar.showMessage(
+            f"已复原历史查询: {getattr(entry, 'symbol', '')} "
+            f"{getattr(entry, 'timeframe', '')} · "
+            f"{getattr(entry, 'model', '')} · {getattr(entry, 'timestamp', '')}"
+        )
 
     def _apply_chart_display_settings(self) -> None:
         """Sync chart label font sizes and decision-flow zoom from persisted settings."""

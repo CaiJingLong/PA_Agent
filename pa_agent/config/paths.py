@@ -4,6 +4,7 @@ All runtime directories are rooted at PROJECT_ROOT.
 Import this module everywhere instead of hard-coding paths.
 """
 from __future__ import annotations
+
 from pathlib import Path
 
 # ── Root ──────────────────────────────────────────────────────────────────────
@@ -21,6 +22,8 @@ RECORDS_PENDING_DIR: Path = PROJECT_ROOT / "records" / "pending"
 EXPERIENCE_DIR: Path = PROJECT_ROOT / "experience"
 CONFIG_DIR: Path = PROJECT_ROOT / "config"
 LOGS_DIR: Path = PROJECT_ROOT / "logs"
+HISTORY_DIR: Path = PROJECT_ROOT / "records" / "history"
+HISTORY_FILE_PATH: Path = HISTORY_DIR / "analysis_history.md"
 
 # ── Individual file paths ─────────────────────────────────────────────────────
 FEISHU_JSON_LEGACY_PATH: Path = CONFIG_DIR / "feishu.json"
