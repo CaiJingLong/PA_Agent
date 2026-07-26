@@ -1,6 +1,7 @@
 """Construct :class:`DataSource` implementations by kind id."""
 from __future__ import annotations
 
+import sys
 from typing import Literal
 
 from pa_agent.data.base import DataSource
@@ -24,10 +25,11 @@ DataSourceKind = Literal[
 DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
     ("mt5", "MT5"),
     ("tradingview", "TradingView"),
+    ("eastmoney", "东方财富"),
 )
 
 _HIDDEN_KINDS: frozenset[DataSourceKind] = frozenset(
-    {"akshare", "tushare", "yfinance", "eastmoney", "eastmoney_futures"}
+    {"akshare", "tushare", "yfinance", "eastmoney_futures"}
 )
 
 _DEFAULT_SYMBOLS: dict[DataSourceKind, str] = {
@@ -47,11 +49,11 @@ def default_tradingview_exchange() -> str:
 
 
 def normalize_data_source_kind(kind: str | None) -> DataSourceKind:
-    """Return a supported data-source kind, defaulting to MT5."""
+    """Return a supported data-source kind, defaulting to East Money."""
     supported = {k for k, _ in DATA_SOURCE_CHOICES} | _HIDDEN_KINDS
     if kind in supported:
         return kind  # type: ignore[return-value]
-    return "mt5"
+    return "eastmoney"
 
 
 def data_source_label(kind: str | None) -> str:
@@ -106,6 +108,10 @@ def create_data_source(kind: str | None) -> DataSource:
         from pa_agent.data.yfinance_source import YFinanceSource
 
         return YFinanceSource()
-    from pa_agent.data.mt5 import MT5Source
-
-    return MT5Source()
+    # Windows: native MetaTrader5 package. macOS / Linux: mt5linux bridge
+    # (requires a running `python -m mt5linux` RPyC server under Wine).
+    if sys.platform == "win32":
+        from pa_agent.data.mt5 import MT5Source
+        return MT5Source()
+    from pa_agent.data.mt5_linux import MT5LinuxSource
+    return MT5LinuxSource()

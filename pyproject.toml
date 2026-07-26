@@ -20,6 +20,7 @@ dependencies = [
     "jsonschema>=4.22",
     "pydantic>=2.7",
     "MetaTrader5>=5.0; sys_platform == 'win32'",
+    "mt5linux>=1.0; sys_platform != 'win32'",
     "tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git",
     "cryptography>=42",
     "pywin32>=306; sys_platform == 'win32'",
@@ -57,6 +58,10 @@ target-version = "py311"
 [tool.ruff.lint]
 extend-select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 ignore = ["E501"]
+
+# CLI 脚本：单行输出函数 + 面向用户的中文标点是刻意的
+[tool.ruff.lint.per-file-ignores]
+"tools/macos/pa_mac.py" = ["E701", "E702", "RUF001", "RUF002", "RUF003", "BLE001", "S110", "PLW1510"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -8,11 +8,18 @@
 遇到问题时按"故障排查"章节处理。最后必须通过验收环节才能交付给用户。
 
 【重要：Mac 与 Windows 的核心差异】
-1. MT5（MetaTrader 5）没有 macOS 原生版本，Mac 版使用 TradingView 作为默认数据源
-2. pywin32 / MetaTrader5 包不支持 macOS，无需安装
-3. 不需要 bat 文件，Mac 用 .command 文件（双击即可运行）
-4. pyproject.toml 中 MetaTrader5 和 pywin32 标记了 sys_platform == 'win32'，macOS 下 pip 会自动跳过
-5. 项目代码已做了平台兼容：数据源通过 factory.py 工厂创建，Mac 下默认使用 TradingView
+1. MT5（MetaTrader 5）官方提供 macOS 版（基于 Wine 的封装），Mac 上既可使用
+   TradingView 也可使用 MT5 作为数据源。TradingView 开箱即用、全平台；
+   MT5 需额外搭建 Wine + Windows Python + RPyC 桥接环境（见第四步 B）。
+2. 官方 MetaTrader5 PyPI 包只发 Windows wheel，macOS 通过 mt5linux 桥接：
+   Wine 内跑 Windows Python + MetaTrader5 包作为 RPyC server，
+   Mac 原生 Python 作为 client 通过网络调用。
+3. pywin32 只在 Windows 原生环境需要；mt5linux 桥接路径下 pywin32 装在 Wine 内的 Windows Python。
+4. 不需要 bat 文件，Mac 用 .command 文件（双击即可运行）
+5. pyproject.toml 中 MetaTrader5 和 pywin32 标记 sys_platform == 'win32'，macOS 原生 pip 会自动跳过；
+   mt5linux 标记 sys_platform != 'win32'，macOS 原生 pip 会自动安装。
+6. 项目代码已做平台兼容：factory.py 按 sys.platform 分流，
+   Windows 走原生 MT5Source，macOS/Linux 走 MT5LinuxSource（mt5linux 桥接）。
 
 【重要：项目路径】
 本文档中 PROJECT_ROOT 代表 PA_Agent 项目的根目录。
@@ -212,75 +219,143 @@
     系统偏好设置 → 安全性与隐私 → 允许从以下位置下载的 App → 允许 Python
 
 ================================================================
-  第四步：修改项目代码适配 macOS
+  第四步：数据源配置（TradingView 默认 / MT5 可选）
 ================================================================
 
-Mac 版需要修改以下文件，使程序默认使用 TradingView 数据源而非 MT5。
+Mac 版支持两种 K 线数据源：
+- TradingView：开箱即用，无需额外环境，推荐大多数用户
+- MT5：需搭建 Wine + Windows Python + RPyC 桥接环境，适合必须用 MT5 专属品种的用户
 
-4.1 修改 pyproject.toml — 无需修改
-  pyproject.toml 中 MetaTrader5 和 pywin32 已标记 sys_platform == 'win32'，
-  macOS 下 pip install -e . 会自动跳过这两个包。无需手动修改。
+项目代码已做平台兼容（factory.py 按 sys.platform 分流），无需改任何代码即可在
+Mac 上选择 MT5 数据源——前提是完成了下面的 4B 桥接环境搭建。
 
-4.2 修改 pa_agent/config/settings.py — 无需修改
-  settings.py 中 last_data_source 的默认值 "mt5" 在 Mac 上会导致启动时报错，
-  但程序已在 app_context.py 中做了 try-except 处理：
-  MT5 连接失败时会打印警告但不会崩溃。
-  不过为了更好的体验，需要修改默认配置，见 4.3。
+----------------------------------------------------------------
+4A 默认数据源（TradingView，无需任何修改）
+----------------------------------------------------------------
+pyproject.toml、settings.py、factory.py 均无需修改。
 
-4.3 修改 pa_agent/data/factory.py — 关键修改
-  将 normalize_data_source_kind() 的默认返回值从 "mt5" 改为 "tradingview"，
-  以及 DATA_SOURCE_CHOICES 的顺序调整为 TradingView 在前。
+- pyproject.toml 中 MetaTrader5 和 pywin32 标记 sys_platform == 'win32'，
+  macOS 下 pip install -e . 会自动跳过；mt5linux 标记 sys_platform != 'win32'，
+  macOS 下会自动安装（仅 client 端，server 端在 Wine 内单独装，见 4B）。
+- settings.py 中 last_data_source 默认 "mt5"：若用户未搭建 4B 桥接环境，
+  程序在 app_context.py 中做了 try-except 处理，MT5 连接失败时打印警告但不崩溃，
+  用户可在 GUI 下拉框手动切换到 TradingView。
+- 想让 Mac 开箱即用 TradingView（跳过 MT5 警告），可在 GUI 启动后
+  菜单 → 设置 → 数据来源 选择 TradingView，或直接编辑 config/settings.json
+  把 general.last_data_source 改为 "tradingview"。无需改源码。
 
-  编辑 PROJECT_ROOT/pa_agent/data/factory.py：
+----------------------------------------------------------------
+4B 可选：搭建 MT5 桥接环境（在 Mac 上使用 MT5 数据源）
+----------------------------------------------------------------
+原理：官方 MetaTrader 5.app 自带 Wine（Contents/SharedSupport/wine/），
+终端装在 Wine prefix 内。我们在同一个 Wine prefix 里放一个 Windows Python，
+装上 MetaTrader5 + mt5linux + rpyc + pywin32，跑一个 RPyC server；
+Mac 原生 Python 通过 mt5linux client 经网络（127.0.0.1:18812）调用 server，
+server 再用官方 MetaTrader5 包连到同在 Wine 内的 MT5 终端。
 
-  找到：
-    DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
-        ("mt5", "MT5"),
-        ("tradingview", "TradingView"),
-    )
+前置：已从 https://www.metatrader5.com/en/download 下载并安装官方 Mac 版，
+打开终端并登录账号。
 
-  改为：
-    DATA_SOURCE_CHOICES: tuple[tuple[DataSourceKind, str], ...] = (
-        ("tradingview", "TradingView"),
-        ("mt5", "MT5"),
-    )
+步骤 1：在 Wine prefix 内部署 Windows Python（embeddable，纯 64 位）
 
-  找到 normalize_data_source_kind 函数中的：
-    return "mt5"
+  WINE="/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine"
+  WINEPREFIX="$HOME/Library/Application Support/net.metaquotes.wine.metatrader5"
+  export WINEPREFIX
 
-  改为：
-    return "tradingview"
+  # 下载 Python 3.12 embeddable (amd64)
+  cd /tmp
+  curl -sL -o py312-embed.zip "https://www.python.org/ftp/python/3.12.7/python-3.12.7-embed-amd64.zip"
+  unzip -q -o py312-embed.zip -d py312-embed
 
-4.4 修改 pa_agent/config/settings.py — 关键修改
-  将 GeneralSettings 中 last_data_source 的默认值从 "mt5" 改为 "tradingview"。
+  # 部署到 Wine prefix 的 C:\Python312
+  rm -rf "$WINEPREFIX/drive_c/Python312"
+  cp -r py312-embed "$WINEPREFIX/drive_c/Python312"
 
-  编辑 PROJECT_ROOT/pa_agent/config/settings.py：
+  # 启用 site-packages（embeddable 默认禁用）
+  PTH="$WINEPREFIX/drive_c/Python312/python312._pth"
+  sed -i '' 's/^#import site/import site/' "$PTH"
 
-  找到：
-    last_data_source: DataSourceKind = "mt5"
+  # 验证
+  "$WINE" "$WINEPREFIX/drive_c/Python312/python.exe" -c "import sys; print(sys.version)"
+  预期输出：3.12.7 ... [MSC v.1941 64 bit (AMD64)]
 
-  改为：
-    last_data_source: DataSourceKind = "tradingview"
+  注意：不要用 python-3.12.x-amd64.exe installer——它会触发 Wine 的 32 位子系统
+  （syswow64\ntdll.dll 加载失败）。embeddable 包纯 64 位，解压即用，无此问题。
 
-  同时将默认品种从 MT5 品种改为 TradingView 品种：
+步骤 2：在 Wine Python 内装 pip + MetaTrader5 + mt5linux
 
-  找到：
-    last_symbol: str = "XAUUSDm"
+  PY="$WINEPREFIX/drive_c/Python312/python.exe"
 
-  改为：
-    last_symbol: str = "XAUUSD"
+  # 装 pip
+  curl -sL -o /tmp/get-pip.py "https://bootstrap.pypa.io/get-pip.py"
+  "$WINE" "$PY" /tmp/get-pip.py
 
-  （注意：MT5 品种名通常带 "m" 后缀如 XAUUSDm，TradingView 用标准名 XAUUSD）
+  # 装桥接依赖（pywin32 是 MetaTrader5 包的运行时依赖）
+  "$WINE" "$PY" -m pip install MetaTrader5 mt5linux rpyc pywin32
 
-4.5 修改 pa_agent/gui/main_window.py — UI 提示文本
+  验证 MetaTrader5 能连到终端：
+  "$WINE" "$PY" -c "
+  import MetaTrader5 as mt5
+  path = r'C:\Program Files\MetaTrader 5\terminal64.exe'
+  ok = mt5.initialize(path)
+  print('initialize:', ok)
+  if ok:
+      info = mt5.terminal_info()
+      print('terminal:', info.name, 'build:', info.build)
+      mt5.shutdown()
+  "
+  预期输出：initialize: True / terminal: MetaTrader 5 build: xxxx
+
+  注意：mt5.initialize() 必须传 terminal path，否则报
+  "IPC initialize failed, MetaTrader 5 x64 not found"——
+  官方 Mac 版把终端装在 Wine prefix 的非默认路径，自动探测找不到。
+  项目代码 MT5LinuxSource 已默认传 C:\Program Files\MetaTrader 5\terminal64.exe，
+  可通过环境变量 PA_MT5_TERMINAL_PATH 覆盖。
+
+步骤 3：启动 mt5linux RPyC server（每次使用 MT5 数据源前都要启动）
+
+  WINE="/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine"
+  WINEPREFIX="$HOME/Library/Application Support/net.metaquotes.wine.metatrader5"
+  export WINEPREFIX
+  PY="$WINEPREFIX/drive_c/Python312/python.exe"
+  "$WINE" "$PY" -m mt5linux --host 127.0.0.1 --port 18812
+
+  保持此终端窗口开着。server 日志出现
+  "server started on [127.0.0.1]:18812" 即就绪。
+
+  可选：做成后台脚本 mt5_server.command 放在项目根目录，双击启动：
+    cat > "PROJECT_ROOT/mt5_server.command" << 'EOF'
+#!/bin/bash
+WINE="/Applications/MetaTrader 5.app/Contents/SharedSupport/wine/bin/wine"
+export WINEPREFIX="$HOME/Library/Application Support/net.metaquotes.wine.metatrader5"
+PY="$WINEPREFIX/drive_c/Python312/python.exe"
+"$WINE" "$PY" -m mt5linux --host 127.0.0.1 --port 18812
+EOF
+    chmod +x "PROJECT_ROOT/mt5_server.command"
+
+步骤 4：在 GUI 中切换到 MT5 数据源
+
+  启动 PA Agent（运行智能体.command），在工具栏"数据来源"下拉框选"MT5"。
+  若 server 未启动或终端未登录，会提示连接失败，切回 TradingView 即可。
+
+  环境变量覆盖（可选）：
+  - PA_MT5_TERMINAL_PATH：terminal64.exe 的 Windows 路径（默认 C:\Program Files\MetaTrader 5\terminal64.exe）
+  - PA_MT5LINUX_HOST：RPyC server host（默认 127.0.0.1）
+  - PA_MT5LINUX_PORT：RPyC server port（默认 18812）
+
+----------------------------------------------------------------
+4.5 修改 pa_agent/gui/main_window.py — UI 提示文本（可选）
+----------------------------------------------------------------
   编辑 PROJECT_ROOT/pa_agent/gui/main_window.py：
 
   找到所有 "MT5" 相关的提示文本并适当修改（可选，不影响功能）：
   - "输入 MT5 品种名，如 XAUUSDm…" → "输入品种名，如 XAUUSD…"
   - "K 线数据来源：MT5（需终端登录）、TradingView（tvDatafeed）" →
-    "K 线数据来源：TradingView（tvDatafeed）、MT5（仅 Windows）"
+    "K 线数据来源：TradingView（tvDatafeed）、MT5（需启动 mt5linux server）"
 
+----------------------------------------------------------------
 4.6 确认项目目录结构完整性
+----------------------------------------------------------------
 
   cd PROJECT_ROOT
   test -f pa_agent/main.py && echo "main.py OK" || echo "main.py MISSING"
@@ -362,7 +437,7 @@ EOF
 - 程序窗口成功弹出（PyQt6 GUI 窗口出现）
 - 窗口标题显示 "PA Agent"
 - 控制台无 ImportError / ModuleNotFoundError 等致命错误
-- 数据源默认显示为 TradingView（而非 MT5）
+- 数据源默认显示为 TradingView（开箱即用）；若已完成 4B 桥接环境并启动 mt5linux server，可手动切换到 MT5
 
 若窗口正常弹出，关闭窗口即可（点 X 退出）。
 
@@ -383,7 +458,7 @@ EOF
   [ ] python3 run.py 窗口正常弹出
   [ ] 运行智能体.command 双击窗口正常弹出
   [ ] 控制台无 ImportError / ModuleNotFoundError
-  [ ] 数据源默认为 TradingView（非 MT5）
+  [ ] 数据源默认为 TradingView（开箱即用）；MT5 为可选，需完成 4B 桥接环境
 
 全部通过 → 部署成功，可交付用户。
 任一项失败 → 根据错误信息对照故障排查章节修复后重新验收。
@@ -432,10 +507,11 @@ API Key 会被存储在 config/settings.json 中。
   附：Mac 特有问题
 ================================================================
 
-Q: macOS 上没有 MT5，怎么办？
-A: Mac 版不使用 MT5，默认使用 TradingView 作为数据源。TradingView 支持外汇、
-   期货、加密货币、股票等多种品种，覆盖了大部分 MT5 的品种。
-   如果必须使用 MT5，可以通过虚拟机（Parallels Desktop / VMware Fusion）运行 Windows。
+Q: macOS 上能用 MT5 吗？
+A: 可以。官方 MetaTrader 5.app 提供基于 Wine 的 macOS 版，终端可正常登录使用。
+   但官方 MetaTrader5 PyPI 包只发 Windows wheel，需通过 mt5linux 桥接：
+   在 Wine prefix 内放一个 Windows Python 跑 RPyC server，Mac 原生 Python 当 client。
+   完整步骤见第四步 4B。若不想搭建桥接环境，TradingView 覆盖了大部分品种。
 
 Q: macOS 上 PyQt6 窗口字体模糊
 A: 如果使用 Retina 显示器，PyQt6 通常会自动适配。若仍然模糊：

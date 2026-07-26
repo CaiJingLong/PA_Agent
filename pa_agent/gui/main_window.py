@@ -395,24 +395,24 @@ class MainWindow(QMainWindow):
         ctrl_layout.setSpacing(8)
 
         _settings = getattr(self._ctx, "settings", None)
-        _last_symbol = "XAUUSDm"
+        _last_symbol = "000001"
         _last_tf = "15m"
         if _settings is not None:
-            _last_symbol = getattr(_settings.general, "last_symbol", "XAUUSDm") or "XAUUSDm"
+            _last_symbol = getattr(_settings.general, "last_symbol", "000001") or "000001"
             _last_tf = getattr(_settings.general, "last_timeframe", "15m") or "15m"
 
         # Data source
         from pa_agent.data.factory import DATA_SOURCE_CHOICES, normalize_data_source_kind
 
-        _last_ds = "mt5"
+        _last_ds = "eastmoney"
         if _settings is not None:
             _last_ds = normalize_data_source_kind(
-                getattr(_settings.general, "last_data_source", "mt5")
+                getattr(_settings.general, "last_data_source", "eastmoney")
             )
-        # 如果上次保存的数据源不在 UI 可选列表中, 强制回退 MT5
+        # 如果上次保存的数据源不在 UI 可选列表中, 强制回退东方财富
         _ui_kinds = {k for k, _ in DATA_SOURCE_CHOICES}
         if _last_ds not in _ui_kinds:
-            _last_ds = "mt5"
+            _last_ds = "eastmoney"
         self._active_data_source_kind = _last_ds
 
         ctrl_layout.addWidget(QLabel("数据来源:"))
