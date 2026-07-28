@@ -326,6 +326,7 @@ class MainWindow(QMainWindow):
         self._demo_auto_next_armed = False
         self._demo_waiting_flow_playback = False
         self._startup_api_key_check_done = False
+        self._skip_history_write = False  # 复原历史时跳过重复写入
         self._startup_tv_connectivity_check_done = False
         self._symbol_switch_timer: QTimer | None = None
         self._pending_symbol_switch: tuple[str, str] | None = None
@@ -1850,6 +1851,9 @@ class MainWindow(QMainWindow):
 
     def _on_fetch_data_clicked(self) -> None:
         """Start (or restart) continuous data refresh for the current symbol/timeframe."""
+        # 复原/演示模式下点「获取数据」意味着要回到实时模式，先退出 demo
+        if getattr(self, "_demo_mode", False):
+            self._exit_demo_mode(silent=True)
         data_source = getattr(self._ctx, "data_source", None)
         if data_source is None or not getattr(data_source, "_connected", False):
             self._status_bar.showMessage("数据源未连接，请先切换数据来源")
@@ -4009,13 +4013,14 @@ class MainWindow(QMainWindow):
     def _on_record_ready_impl(self, record: Any) -> None:
         self._last_analysis_record = record
         # ── Append to markdown history (best-effort, never blocks UI) ────────
-        try:
-            from pa_agent.records.history_writer import append_history_entry
-            from pa_agent.records.pending_writer import _build_basename
-            pending_name = _build_basename(record) + ".json"
-            append_history_entry(record, pending_name)
-        except Exception as _hist_exc:
-            logger.debug("history write skipped: %s", _hist_exc)
+        if not self._skip_history_write:
+            try:
+                from pa_agent.records.history_writer import append_history_entry
+                from pa_agent.records.pending_writer import _build_basename
+                pending_name = _build_basename(record) + ".json"
+                append_history_entry(record, pending_name)
+            except Exception as _hist_exc:
+                logger.debug("history write skipped: %s", _hist_exc)
         import json as _json
 
         exc_info = getattr(record, "exception", None)
@@ -4727,7 +4732,12 @@ class MainWindow(QMainWindow):
         # Push the full record into debug + stream + decision panels at once.
         # _on_record_ready_impl fills debug turns, stream show_stage_result,
         # decision panel, decision tree, future trend, prompt-files panel.
-        self._on_record_ready(record)
+        # 复原时不重复写入历史记录
+        self._skip_history_write = True
+        try:
+            self._on_record_ready(record)
+        finally:
+            self._skip_history_write = False
 
         # _on_analysis_finished fills chart decision overlay, decision panel,
         # future trend, decision tree, summary strip, decision badge.
